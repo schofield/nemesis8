@@ -99,6 +99,25 @@ def install_bun(name: str, spec: dict, install_cfg: dict) -> None:
         subprocess.run([binary, "--version"], check=True, env=env)
 
 
+def run_curl_installer(url: str, installer_args: list[str]) -> None:
+    """Retry transient downloads, then execute the complete script once."""
+    import tempfile
+
+    print(f"[install-providers] downloading {url}", flush=True)
+    with tempfile.TemporaryDirectory() as td:
+        script = str(Path(td) / "install.sh")
+        subprocess.run(
+            ["curl", "-fsSL", "--retry", "5", "--retry-max-time", "180",
+             "--connect-timeout", "30", "--max-time", "120", "-o", script, url],
+            check=True,
+        )
+        # Preserve bash -s semantics and arguments; never pipe partial/retried
+        # downloads into a running shell or interpolate URLs into shell code.
+        with open(script, "rb") as installer:
+            subprocess.run(["bash", "-s", "--", *installer_args],
+                           stdin=installer, check=True)
+
+
 def install_curl(name: str, spec: dict, install_cfg: dict) -> None:
     url = install_cfg.get("url")
     if not url:
@@ -110,17 +129,8 @@ def install_curl(name: str, spec: dict, install_cfg: dict) -> None:
     # Optional args passed through to the installer script (bash -s -- <args>).
     # e.g. hermes's install.sh takes --skip-browser to skip its default ~290 MB
     # Playwright/Chromium download (browser tools off by default; keep builds lean).
-    import shlex
-    installer_args = install_cfg.get("args") or []
-    args_str = " ".join(shlex.quote(str(a)) for a in installer_args)
-    pipe_tail = f" | bash -s -- {args_str}" if args_str else " | bash"
-    print(f"[install-providers] curl {url}{pipe_tail}")
-    # set -eo pipefail so curl failures surface as a non-zero exit instead
-    # of bash silently succeeding on empty input.
-    subprocess.run(
-        f"set -eo pipefail; curl -fsSL {url}{pipe_tail}",
-        shell=True, executable="/bin/bash", check=True,
-    )
+    installer_args = [str(a) for a in (install_cfg.get("args") or [])]
+    run_curl_installer(url, installer_args)
 
     # Locate the binary anywhere on the filesystem (single device, skips
     # proc/sys/etc). Include symlinks: installers often ship a versioned file

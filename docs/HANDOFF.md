@@ -101,6 +101,28 @@ warning text.
    new one in — running panes survive, new launches get the new build.
    Restart the gateway daemon afterward or it keeps serving the old code.
 
+## Linux startup resilience (2026-10-15)
+
+- Provider curl installers download completely before execution and retry
+  transient failures, including GitHub HTTP 429. Regression checks:
+  `python3 -m unittest discover -s scripts -p 'test_install_providers.py'`.
+- Initial agent setup probes gateway HTTP health and tunnel TCP connectivity
+  from a temporary container on the same network and with the same host aliases
+  as agents. Failure warns about routing/firewall rules; offline use continues.
+- Gateway HTTP connections use a three-second TCP budget across resolved
+  addresses and five-second write/read timeouts. Entry announces registration
+  and points at host connectivity/firewall checks when it fails.
+- Codex API keys are optional in its provider TOML because ChatGPT login can
+  supply credentials. An absent API key does not establish a failed login.
+- Validation (2026-10-16): release build, Rust library/bin suites, six Python
+  regressions, and gateway health/MCP smoke passed. The MCP-config gate fails
+  for antigravity/lume HTTP support on both this branch and clean upstream
+  b90443d; do not mistake that existing failure for a startup regression.
+- Ubuntu UFW was observed dropping Docker bridge traffic to host gateway
+  TCP 9801. A scoped host firewall rule restored HTTP 200 and unblocked Codex
+  launch. See README troubleshooting; no machine-specific firewall rule is
+  installed by n8. Reverse tunnels use TCP 9803 separately.
+
 ## In-flight / parked
 
 - `mcp-bins/hyperia-cli.js` working-tree diff — #75, not n8-agent-owned.

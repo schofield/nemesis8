@@ -487,9 +487,13 @@ fn register_with_gateway(def: &ProviderDef) {
     .to_string();
     // Wait for 2xx before returning so the subsequent /expose cannot race
     // resolve_tunnel_container against an in-flight register handler.
+    elog!("[nemesis8-entry] registering with control plane ({gw}; TCP timeout 3s)");
     match nemesis8::monitor::http_post_json_ok(&url, &body, token.as_deref()) {
         Ok(()) => elog!("[nemesis8-entry] registered with control plane ({agent_id})"),
-        Err(e) => elog!("[nemesis8-entry] register failed (non-fatal): {e}"),
+        Err(e) => elog!(
+            "[nemesis8-entry] register failed (non-fatal): {e}; continuing startup. \
+             Check Docker-to-host gateway connectivity and the host firewall."
+        ),
     }
 }
 

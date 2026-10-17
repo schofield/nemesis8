@@ -128,6 +128,46 @@ Rust that goes into those binaries? Use `--from-source` (implied by `--glint`).
 
 Cargo caches persist on the shared data home — crates download once, ever.
 
+## Linux startup troubleshooting
+
+Initial agent setup runs a temporary container on the agent network to check
+the host gateway health endpoint and the reverse-tunnel TCP listener. Failed
+checks report routing/firewall diagnostics before launching the provider; they
+do not alter firewall rules or prevent offline use.
+
+A ChatGPT login does not require an API key. If startup pauses after the API-key
+message, check the next control-plane registration message: containers must be
+able to reach the host gateway on TCP 9801. A host firewall can drop that traffic
+even when the gateway listens on `0.0.0.0`.
+
+From the host, test a running container (replace `<container>` with its name):
+
+```bash
+docker exec <container> curl --connect-timeout 3 --max-time 5 http://host.docker.internal:9801/health
+sudo journalctl -k --since "10 min ago" | grep 'UFW BLOCK'
+```
+
+If UFW is blocking the gateway, identify the incoming Docker bridge, source
+subnet, and destination host address from the blocked packet and
+`docker network inspect`. Allow only that bridge/subnet to that host address
+and TCP 9801; for example, **substitute your actual values**:
+
+```bash
+sudo ufw allow in on br-<network-id> from <docker-subnet> to <host-gateway-ip> port 9801 proto tcp
+```
+
+Verify the health request returns HTTP 200, then restart the session. Reverse
+tunnels also require container-to-host TCP 9803; inspect the firewall log for
+that endpoint separately if callback or port exposure fails. Rules tied to a
+bridge must be updated if the Docker network is recreated. n8 does not alter
+the host firewall automatically. Unavailable gateway registration is non-fatal:
+TCP attempts have a three-second budget, with separate five-second read/write
+timeouts, and provider startup continues after failure.
+
+Provider installer scripts retry transient download failures (including HTTP
+429) before executing the completed download. Permanent failures still fail
+the image build rather than silently omitting a selected provider.
+
 ## Configuration
 
 `.nemesis8.toml` per workspace (local wins), `~/.nemesis8/config.toml` global:

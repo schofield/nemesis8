@@ -205,6 +205,34 @@ fn pool_put(hostport: &str, stream: std::net::TcpStream) {
     }
 }
 
+/// Bound TCP connection attempts, including all resolved addresses, so a
+/// firewall dropping SYN packets cannot stall provider startup for minutes.
+fn connect_gateway(hostport: &str) -> std::io::Result<std::net::TcpStream> {
+    use std::net::ToSocketAddrs;
+
+    const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+    let addresses = hostport.to_socket_addrs()?;
+    let deadline = std::time::Instant::now() + CONNECT_TIMEOUT;
+    let mut last_error = std::io::Error::new(
+        std::io::ErrorKind::AddrNotAvailable,
+        "gateway resolved to no addresses",
+    );
+    for address in addresses {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "gateway TCP connection timed out after 3s",
+            ));
+        }
+        match std::net::TcpStream::connect_timeout(&address, remaining) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = error,
+        }
+    }
+    Err(last_error)
+}
+
 /// POST JSON over a pooled keep-alive connection; returns (status, body).
 fn http_post_json_pooled(
     url: &str,
@@ -217,7 +245,7 @@ fn http_post_json_pooled(
         let (mut stream, reused) = match pool_take(&hostport) {
             Some(s) => (s, true),
             None => {
-                let s = std::net::TcpStream::connect(&hostport)?;
+                let s = connect_gateway(&hostport)?;
                 let _ = s.set_nodelay(true);
                 (s, false)
             }
@@ -300,6 +328,7 @@ fn write_post_request(
         "POST {path} HTTP/1.1\r\nHost: {hostport}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{auth}Connection: keep-alive\r\n\r\n{body}",
         body.len()
     );
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     stream.write_all(req.as_bytes())?;
     stream.flush()
 }
@@ -743,6 +772,39 @@ mod tests {
         );
         http_post_json(&url, "{}", None).unwrap();
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), 2, "second request rode the same connection");
+    }
+
+    #[test]
+    fn gateway_connection_refused_returns_promptly() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let started = std::time::Instant::now();
+        let error = http_post_json_ok(&format!("http://{address}/register"), "{}", None)
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn gateway_connection_can_send_and_receive() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut request = [0; 4];
+            stream.read_exact(&mut request).unwrap();
+            assert_eq!(&request, b"ping");
+            stream.write_all(b"pong").unwrap();
+        });
+        let mut stream = connect_gateway(&address.to_string()).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        stream.write_all(b"ping").unwrap();
+        let mut response = [0; 4];
+        stream.read_exact(&mut response).unwrap();
+        assert_eq!(&response, b"pong");
+        server.join().unwrap();
     }
 
     #[test]

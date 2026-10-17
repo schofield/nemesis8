@@ -44,6 +44,7 @@ flag = "--model"
 env_source = "CODEX_DEFAULT_MODEL"
 
 [provider.api_keys]
+optional = true # ChatGPT login can supply credentials without an API key.
 target = "OPENAI_API_KEY"
 chain = ["CODEX_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
 write_to_config = true

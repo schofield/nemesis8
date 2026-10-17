@@ -1608,6 +1608,7 @@ async fn ensure_image(docker: &DockerOps, config: &Config) -> Result<()> {
     docker.ensure_network().await?;
 
     if docker.image_exists().await {
+        check_gateway_setup(docker).await;
         return Ok(());
     }
 
@@ -1621,7 +1622,35 @@ async fn ensure_image(docker: &DockerOps, config: &Config) -> Result<()> {
     docker.build(&context_dir, build_args).await?;
 
     eprintln!("Image built successfully.");
+    check_gateway_setup(docker).await;
     Ok(())
+}
+
+/// Check once per invocation, after the image/network exist and before an
+/// agent starts. No gateway is a supported offline mode, so skip that case.
+async fn check_gateway_setup(docker: &DockerOps) {
+    static CHECKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !nemesis8::daemon::is_listening(docker.gateway_port())
+        || CHECKED.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        return;
+    }
+    eprintln!("[nemesis8] checking container-to-host gateway and tunnel connectivity...");
+    match docker.check_gateway_connectivity().await {
+        Ok(()) => eprintln!("[nemesis8] container-to-host gateway and tunnel: OK"),
+        Err(error) => {
+            eprintln!("[nemesis8] warning: {error}");
+            eprintln!(
+                "[nemesis8] the host gateway is listening but the container probe failed. \
+                 Check Docker routing and host firewall rules for TCP {} and {}. \
+                 On UFW: sudo journalctl -k --since '10 min ago' | grep 'UFW BLOCK'. \
+                 Allow only the agent bridge/subnet to the host gateway address; \
+                 see README Linux startup troubleshooting. Continuing startup.",
+                docker.gateway_port(),
+                nemesis8::tunnel::sibling_tunnel_port(docker.gateway_port()),
+            );
+        }
+    }
 }
 
 /// Handle `n8 agents` — fleet control via the gateway HTTP API.

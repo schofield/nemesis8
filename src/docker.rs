@@ -381,6 +381,17 @@ pub fn host_alias_entries(runtime_binary: &str) -> Vec<String> {
     ]
 }
 
+/// Keep setup probes and agent launches on identical host-alias mappings.
+fn agent_host_alias_entries(runtime_binary: &str) -> Vec<String> {
+    #[allow(unused_mut)]
+    let mut entries = host_alias_entries(runtime_binary);
+    #[cfg(target_os = "linux")]
+    if runtime_binary == "docker" {
+        entries.push("host.docker.internal:172.17.0.1".to_string());
+    }
+    entries
+}
+
 #[cfg(windows)]
 const WIN_PODMAN_PIPE: &str = "//./pipe/podman-machine-default";
 #[cfg(windows)]
@@ -778,6 +789,10 @@ impl DockerOps {
         self.gateway_port = port;
     }
 
+    pub fn gateway_port(&self) -> u16 {
+        self.gateway_port
+    }
+
     /// Get a reference to the underlying bollard Docker client
     pub fn docker(&self) -> &Docker {
         &self.docker
@@ -826,6 +841,41 @@ impl DockerOps {
             .await
             .context("creating docker network")?;
 
+        Ok(())
+    }
+
+    /// Probe the actual agent network, not host loopback (which bypasses UFW).
+    /// No user mounts, credentials, agent process, or published ports are used.
+    pub async fn check_gateway_connectivity(&self) -> Result<()> {
+        let name = format!("n8-gateway-check-{}", uuid::Uuid::new_v4());
+        let mut command = tokio::process::Command::new(&self.runtime_binary);
+        command.args(["run", "--rm", "--name", &name, "--network", DEFAULT_NETWORK]);
+        for alias in agent_host_alias_entries(&self.runtime_binary) {
+            command.args(["--add-host", &alias]);
+        }
+        command.args([
+            "--entrypoint", "python3", &self.image, "-c",
+            include_str!("../scripts/check-gateway.py"),
+            "host.docker.internal", &self.gateway_port.to_string(),
+            &crate::tunnel::sibling_tunnel_port(self.gateway_port).to_string(),
+        ]);
+        command.kill_on_drop(true);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(15), command.output()
+        ).await;
+        // --rm handles normal exits; force cleanup also covers a timed-out CLI.
+        let _ = self.docker.remove_container(&name, Some(RemoveContainerOptions {
+            force: true, ..Default::default()
+        })).await;
+        let output = result.context("container gateway check timed out after 15s")?
+            .context("running container gateway check")?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "container gateway check failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
         Ok(())
     }
 
@@ -2415,18 +2465,7 @@ impl DockerOps {
             }
         }
 
-        #[allow(unused_mut)]
-        let mut extra_hosts = host_alias_entries(&self.runtime_binary);
-
-        // Windows Docker Desktop usually handles this automatically,
-        // but we add it explicitly for Linux Docker. DOCKER ONLY: 172.17.0.1
-        // is docker0's bridge IP — podman's default bridge is 10.88.0.1, so on
-        // podman this line would inject a wrong /etc/hosts entry that can
-        // shadow the correct host-gateway mapping above.
-        #[cfg(target_os = "linux")]
-        if self.runtime_binary == "docker" {
-            extra_hosts.push("host.docker.internal:172.17.0.1".to_string());
-        }
+        let extra_hosts = agent_host_alias_entries(&self.runtime_binary);
 
         // Publish configured ports so servers an agent starts inside the
         // container (dev server on :3000, etc.) are reachable from the host.
